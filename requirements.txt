@@ -1,0 +1,13 @@
+# Python Telegram Bot
+python-telegram-bot==20.7
+
+# QR Code generation
+qrcode[pil]==7.4.2
+Pillow==10.2.0
+
+# Date/time handling
+python-dateutil==2.8.2
+
+# No payment gateway libraries needed!
+# No API costs!
+# Direct UPI payment only!
