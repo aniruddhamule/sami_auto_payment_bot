@@ -1,19 +1,10 @@
 """
-SEMI-AUTOMATIC TELEGRAM PAID MEMBERSHIP BOT
-============================================
-No payment gateway | No API fees | Manual verification
-
-Features:
-✅ QR-code payment display (UPI)
-✅ Order ID generation
-✅ User payment confirmation button
-✅ Manual payment verification by admin
-✅ Single-use invite link (1 user only)
-✅ Invite link expiry (time-limited)
-✅ Automatic channel access after approval
-✅ No link sharing / leak protection
-✅ User & order logging
-✅ No payment gateway fees
+AUTOMATIC TELEGRAM PAID MEMBERSHIP BOT
+======================================
+✅ Instant access after payment confirmation
+✅ One-time use invite links
+✅ Automatic channel access
+✅ No manual approval needed
 """
 
 import logging
@@ -29,9 +20,20 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-from config import *
+import os
+
+# Import config
+try:
+    from config import *
+except ImportError:
+    print("❌ Error: config.py not found or has errors!")
+    print("Please check your config.py file")
+    exit(1)
 
 # Setup logging
+os.makedirs('logs', exist_ok=True)
+os.makedirs('data', exist_ok=True)
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -42,18 +44,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Simple file-based database (no external dependencies)
+# Database files
 ORDERS_FILE = 'data/orders.json'
 MEMBERS_FILE = 'data/members.json'
 INVITE_LINKS_FILE = 'data/invite_links.json'
 
-# Load databases
+# Load/Save database functions
 def load_db(filename, default=None):
     """Load JSON database from file"""
     try:
         with open(filename, 'r') as f:
             return json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return default if default is not None else {}
 
 def save_db(filename, data):
@@ -79,15 +81,19 @@ def generate_order_id():
 
 def generate_qr_code(upi_string):
     """Generate QR code image from UPI string"""
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
-    qr.add_data(upi_string)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    bio = io.BytesIO()
-    img.save(bio, 'PNG')
-    bio.seek(0)
-    return bio
+    try:
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(upi_string)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        bio = io.BytesIO()
+        img.save(bio, 'PNG')
+        bio.seek(0)
+        return bio
+    except Exception as e:
+        logger.error(f"QR Code generation error: {e}")
+        return None
 
 
 def create_upi_string(order_id, amount):
@@ -103,7 +109,7 @@ def create_upi_string(order_id, amount):
     return upi_string
 
 
-async def create_single_use_invite_link(context, user_id, username):
+async def create_single_use_invite_link(context, user_id, username, order_id):
     """Create single-use invite link with expiry"""
     try:
         # Create invite link with expiry and member limit
@@ -113,12 +119,13 @@ async def create_single_use_invite_link(context, user_id, username):
             chat_id=PREMIUM_CHANNEL_ID,
             expire_date=int(expiry_date.timestamp()),
             member_limit=1,  # Single use only
-            name=f"Member_{user_id}_{int(time.time())}"
+            name=f"User_{user_id}_{int(time.time())}"
         )
         
         # Store invite link info
         invite_links_db[str(user_id)] = {
             'link': invite_link.invite_link,
+            'order_id': order_id,
             'created_at': datetime.now().isoformat(),
             'expires_at': expiry_date.isoformat(),
             'used': False,
@@ -151,15 +158,6 @@ def add_member(user_id, username, order_id):
     logger.info(f"✅ User {user_id} added to members")
 
 
-def get_pending_orders():
-    """Get all pending orders awaiting admin approval"""
-    pending = []
-    for order_id, order in orders_db.items():
-        if order['status'] == 'awaiting_approval':
-            pending.append((order_id, order))
-    return pending
-
-
 # ============================================================
 # BOT HANDLERS
 # ============================================================
@@ -168,37 +166,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user = update.effective_user
     
+    # Check if already a member
+    if is_member(user.id):
+        user_link_data = invite_links_db.get(str(user.id), {})
+        invite_link = user_link_data.get('link', PREMIUM_CHANNEL_LINK)
+        
+        await update.message.reply_text(
+            f"✅ *You Already Have Access!*\n\n"
+            f"👤 Welcome back, {user.first_name}!\n\n"
+            f"🔗 Your invite link:\n{invite_link}\n\n"
+            f"If the link has expired, contact admin: {ADMIN_USERNAME}",
+            parse_mode='Markdown',
+            disable_web_page_preview=True,
+            protect_content=True  # Prevent forwarding
+        )
+        return
+    
     welcome_message = f"""
-🎉 **Welcome to {BOT_NAME}!** 🎉
+🎉 *Welcome to {BOT_NAME}!* 🎉
 
 Hello {user.first_name}! 👋
 
-Get **Lifetime Premium Access** for just **₹{MEMBERSHIP_PRICE}**! 🚀
+Get *Lifetime Premium Access* for just *₹{MEMBERSHIP_PRICE}*! 🚀
 
-✨ **What you'll get:**
-• Exclusive premium content
-• Lifetime access (one-time payment)
-• Priority support
-• Regular updates
+✨ *What You'll Get:*
+• 📚 Exclusive premium content
+• ♾️ Lifetime access (one-time payment)
+• 🎯 Instant access after payment
+• 🔄 Regular updates
 
-💳 **Simple Payment Process:**
-1. Get QR code for UPI payment
-2. Pay from any UPI app
-3. Click "Payment Done"
-4. Admin verifies (usually within 1 hour)
-5. Get your exclusive invite link
+💳 *Simple 3-Step Process:*
+1️⃣ Click "Join Membership" below
+2️⃣ Scan QR code and pay ₹{MEMBERSHIP_PRICE}
+3️⃣ Click "I Have Paid" to get instant access!
 
-🔒 **Secure & Protected:**
-• Single-use invite link (just for you)
-• Link expires after {INVITE_LINK_EXPIRY_HOURS} hours
-• No sharing possible
-• Secure payment via UPI
+🔒 *Features:*
+• ⚡ Instant access (no waiting!)
+• 🔐 Secure one-time invite link
+• 📱 Works with any UPI app
+• 💯 100% secure payment
 
-Click below to get started! 👇
+Ready to join? Click below! 👇
 """
     
     keyboard = [
         [InlineKeyboardButton("🚀 Join Membership", callback_data='join_membership')],
+        [InlineKeyboardButton("ℹ️ How It Works", callback_data='how_it_works')],
         [InlineKeyboardButton("📞 Contact Admin", callback_data='contact_admin')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -206,7 +219,8 @@ Click below to get started! 👇
     await update.message.reply_text(
         welcome_message,
         reply_markup=reply_markup,
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        protect_content=True  # Prevent forwarding
     )
 
 
@@ -218,80 +232,195 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     callback_data = query.data
     
     if callback_data == 'join_membership':
-        await show_membership_plans(query, context)
-    elif callback_data == 'select_lifetime':
+        await show_membership_plan(query, context)
+    elif callback_data == 'get_access':
         await initiate_payment(query, context)
     elif callback_data.startswith('confirm_payment_'):
         order_id = callback_data.replace('confirm_payment_', '')
-        await confirm_payment(query, context, order_id)
+        await process_payment_confirmation(query, context, order_id)
     elif callback_data == 'contact_admin':
         await contact_admin(query, context)
+    elif callback_data == 'how_it_works':
+        await show_how_it_works(query, context)
     elif callback_data == 'back_main':
         await back_to_main(query, context)
 
 
-async def show_membership_plans(query, context):
-    """Show membership plan options"""
-    user_id = query.from_user.id
-    
-    # Check if already a member
-    if is_member(user_id):
-        user_link = invite_links_db.get(str(user_id), {}).get('link', PREMIUM_CHANNEL_LINK)
-        await query.edit_message_text(
-            f"✅ You already have **Lifetime Premium Access**!\n\n"
-            f"🔗 Your access link:\n{user_link}\n\n"
-            f"⚠️ This link is single-use and valid for {INVITE_LINK_EXPIRY_HOURS} hours.",
-            parse_mode='Markdown'
-        )
-        return
-    
+async def show_how_it_works(query, context):
+    """Show how it works"""
     message = f"""
-💎 **MEMBERSHIP PLAN** 💎
+❓ *How It Works*
 
-**Lifetime Access – ₹{MEMBERSHIP_PRICE}**
+*Step 1: Get QR Code*
+Click "Join Membership" and then "Get Access Now"
 
-✅ **What's included:**
-• Exclusive premium content
-• Lifetime access (no renewal)
-• Priority support
-• Regular updates
+*Step 2: Pay via UPI*
+Scan the QR code with any UPI app:
+• Google Pay
+• PhonePe  
+• Paytm
+• BHIM
+• Any other UPI app
 
-💳 **Payment Method:**
-• UPI (any UPI app)
-• Direct to merchant
-• No platform fees
-• Secure & instant
+*Step 3: Confirm Payment*
+After paying ₹{MEMBERSHIP_PRICE}, click "✅ I Have Paid"
 
-🔒 **After Payment:**
-• Admin verifies your payment
-• You get single-use invite link
-• Link valid for {INVITE_LINK_EXPIRY_HOURS} hours
-• Access granted immediately
+*Step 4: Get Instant Access*
+You'll immediately receive:
+• One-time invite link
+• Valid for {INVITE_LINK_EXPIRY_HOURS} hours
+• Direct access to premium channel
 
-⏱️ **Verification Time:** Usually within 1 hour
+*Step 5: Join Channel*
+Click the link and join the premium channel!
 
-Ready to join?
+⚡ *Super Fast!* The whole process takes less than 2 minutes!
+
+🔒 *Secure:* Your link works only once and cannot be shared.
 """
     
     keyboard = [
-        [InlineKeyboardButton(f"📦 Get Lifetime Access – ₹{MEMBERSHIP_PRICE}", callback_data='select_lifetime')],
+        [InlineKeyboardButton("🚀 Get Started", callback_data='join_membership')],
         [InlineKeyboardButton("🔙 Back", callback_data='back_main')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    try:
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        # If edit fails, delete and send new
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await query.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            protect_content=True
+        )
+
+
+async def show_membership_plan(query, context):
+    """Show membership plan"""
+    user_id = query.from_user.id
+    
+    # Check if already a member
+    if is_member(user_id):
+        user_link_data = invite_links_db.get(str(user_id), {})
+        invite_link = user_link_data.get('link', PREMIUM_CHANNEL_LINK)
+        
+        message = (
+            f"✅ *You Already Have Access!*\n\n"
+            f"🔗 Your invite link:\n{invite_link}\n\n"
+            f"If the link has expired, contact: {ADMIN_USERNAME}"
+        )
+        
+        try:
+            await query.edit_message_text(
+                message,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            try:
+                await query.message.delete()
+            except:
+                pass
+            await query.message.reply_text(
+                message,
+                parse_mode='Markdown',
+                disable_web_page_preview=True,
+                protect_content=True
+            )
+        return
+    
+    message = f"""
+💎 *LIFETIME MEMBERSHIP* 💎
+
+*Price: ₹{MEMBERSHIP_PRICE}* (One-time payment)
+
+✅ *What's Included:*
+• 📚 Access to all premium content
+• ♾️ Lifetime membership (no renewal)
+• ⚡ Instant access after payment
+• 🎯 Priority support
+• 🔄 Regular content updates
+• 🎁 Exclusive benefits
+
+💳 *Payment:*
+• Secure UPI payment
+• Any UPI app works
+• Direct to merchant
+• No hidden charges
+
+⚡ *Process:*
+1. Pay ₹{MEMBERSHIP_PRICE} via UPI
+2. Click "I Have Paid"
+3. Get instant invite link
+4. Join premium channel
+
+🔒 *Security:*
+• One-time use link
+• Cannot be shared
+• {INVITE_LINK_EXPIRY_HOURS} hours validity
+• Secure payment
+
+Ready to get lifetime access?
+"""
+    
+    keyboard = [
+        [InlineKeyboardButton(f"💳 Get Access Now - ₹{MEMBERSHIP_PRICE}", callback_data='get_access')],
+        [InlineKeyboardButton("❓ How It Works", callback_data='how_it_works')],
+        [InlineKeyboardButton("🔙 Back", callback_data='back_main')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await query.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            protect_content=True
+        )
 
 
 async def initiate_payment(query, context):
-    """Generate QR code and show payment instructions"""
+    """Generate QR code and payment instructions"""
     user_id = query.from_user.id
     username = query.from_user.username or query.from_user.first_name
     
-    # Generate order
+    # Delete previous message
+    try:
+        await query.message.delete()
+    except Exception as e:
+        logger.error(f"Error deleting message: {e}")
+    
+    # Check if user already has a pending order
+    for order_id, order in orders_db.items():
+        if order['user_id'] == user_id and order['status'] == 'pending':
+            # Reuse existing order
+            await show_payment_screen(query, context, order_id, order)
+            return
+    
+    # Generate new order
     order_id = generate_order_id()
     amount = MEMBERSHIP_PRICE
     
@@ -307,74 +436,90 @@ async def initiate_payment(query, context):
     }
     save_db(ORDERS_FILE, orders_db)
     
+    logger.info(f"📦 New order created: {order_id} by user {user_id} ({username})")
+    
+    await show_payment_screen(query, context, order_id, orders_db[order_id])
+
+
+async def show_payment_screen(query, context, order_id, order):
+    """Display payment QR code and instructions"""
+    
     # Generate UPI string and QR code
-    upi_string = create_upi_string(order_id, amount)
+    upi_string = create_upi_string(order_id, order['amount'])
     qr_image = generate_qr_code(upi_string)
     
+    if not qr_image:
+        await query.message.reply_text(
+            "❌ Error generating QR code. Please try again or contact admin.",
+            parse_mode='Markdown',
+            protect_content=True
+        )
+        return
+    
     payment_message = f"""
-💳 **PAYMENT INSTRUCTIONS** 💳
+💳 *PAYMENT DETAILS*
 
-📋 **Order ID:** `{order_id}`
-💰 **Amount:** ₹{amount}
-⏰ **Valid for:** {PAYMENT_EXPIRY_MINUTES} minutes
-🎯 **Access:** Lifetime
+📋 *Order ID:* `{order_id}`
+💰 *Amount:* ₹{order['amount']}
+⏰ *Valid for:* {PAYMENT_EXPIRY_MINUTES} minutes
 
-**📱 HOW TO PAY:**
+*📱 HOW TO PAY:*
 
-**Step 1:** Scan the QR code below with any UPI app:
-• Google Pay
-• PhonePe
-• Paytm
-• BHIM
-• Or any other UPI app
+*Option 1: Scan QR Code* (Recommended)
+• Open any UPI app on your phone
+• Scan the QR code below
+• Pay ₹{order['amount']}
+• Come back and click "✅ I Have Paid"
 
-**Step 2:** Complete the payment of **₹{amount}**
+*Option 2: Pay via UPI ID*
+• UPI ID: `{UPI_ID}`
+• Amount: ₹{order['amount']}
+• Note: {order_id}
 
-**Step 3:** Click the **✅ Payment Done** button below
+*⚡ AFTER PAYMENT:*
+1. Click "✅ I Have Paid" button below
+2. You'll get instant invite link
+3. Click the link to join premium channel
+4. Start enjoying premium content!
 
-**Step 4:** Admin will verify your payment (usually within 1 hour)
+*🔒 Your link will be:*
+• Valid for {INVITE_LINK_EXPIRY_HOURS} hours
+• One-time use only
+• Cannot be shared
+• Secure and private
 
-**Step 5:** You'll receive your single-use invite link
-
-⚠️ **IMPORTANT:**
-• QR code expires in {PAYMENT_EXPIRY_MINUTES} minutes
-• Pay the exact amount: ₹{amount}
-• Click "Payment Done" ONLY after completing payment
-• Keep your payment screenshot ready
-• Note your Order ID: `{order_id}`
-
-**Direct UPI ID:** `{UPI_ID}`
-**Merchant:** {MERCHANT_NAME}
+*Need help?* Contact: {ADMIN_USERNAME}
 """
     
     keyboard = [
-        [InlineKeyboardButton("✅ I Have Paid – Verify Payment", callback_data=f'confirm_payment_{order_id}')],
-        [InlineKeyboardButton("📞 Contact Admin", callback_data='contact_admin')],
-        [InlineKeyboardButton("🔙 Cancel", callback_data='back_main')],
+        [InlineKeyboardButton("✅ I Have Paid - Get Access Now", callback_data=f'confirm_payment_{order_id}')],
+        [InlineKeyboardButton("📞 Contact Admin", callback_data='contact_admin_photo')],
+        [InlineKeyboardButton("🔙 Cancel", callback_data='back_main_photo')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # Send QR code
-    await query.message.reply_photo(
-        photo=qr_image,
-        caption=payment_message,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    
-    # Delete previous message
     try:
-        await query.message.delete()
-    except:
-        pass
-    
-    # Log the order
-    logger.info(f"📦 New order created: {order_id} by user {user_id} ({username})")
+        await query.message.reply_photo(
+            photo=qr_image,
+            caption=payment_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            protect_content=True  # Prevent forwarding
+        )
+    except Exception as e:
+        logger.error(f"Error sending payment screen: {e}")
+        await query.message.reply_text(
+            f"❌ Error displaying payment screen. Please contact admin.\nError: {str(e)}",
+            parse_mode='Markdown',
+            protect_content=True
+        )
 
 
-async def confirm_payment(query, context, order_id):
-    """User confirms payment - send for admin verification"""
+async def process_payment_confirmation(query, context, order_id):
+    """Process payment confirmation and grant instant access"""
     user_id = query.from_user.id
+    username = query.from_user.username or query.from_user.first_name
     
     # Check if order exists
     if order_id not in orders_db:
@@ -389,439 +534,291 @@ async def confirm_payment(query, context, order_id):
         return
     
     # Check if already processed
-    if order['status'] in ['awaiting_approval', 'verified', 'approved']:
-        await query.answer("⏳ Your payment is already under review!", show_alert=True)
+    if order['status'] == 'approved':
+        user_link_data = invite_links_db.get(str(user_id), {})
+        invite_link = user_link_data.get('link', PREMIUM_CHANNEL_LINK)
+        
+        # Delete QR code message and send new message
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+        await query.message.reply_text(
+            f"✅ *Payment Already Confirmed!*\n\n"
+            f"🔗 Your invite link:\n{invite_link}\n\n"
+            f"Click the link above to join the premium channel!",
+            parse_mode='Markdown',
+            disable_web_page_preview=True,
+            protect_content=True
+        )
         return
     
     # Check if expired
-    expires_at = datetime.fromisoformat(order['expires_at'])
-    if datetime.now() > expires_at:
-        await query.answer("⏰ Payment window expired! Please create a new order.", show_alert=True)
+    try:
+        expires_at = datetime.fromisoformat(order['expires_at'])
+        if datetime.now() > expires_at:
+            await query.answer("⏰ Payment window expired! Please create a new order.", show_alert=True)
+            return
+    except:
+        pass
+    
+    # Delete QR code message
+    try:
+        await query.message.delete()
+    except:
+        pass
+    
+    # Show processing message
+    processing_msg = await query.message.reply_text(
+        "⏳ *Processing your payment...*\n\n"
+        "Please wait while we create your exclusive invite link...",
+        parse_mode='Markdown',
+        protect_content=True
+    )
+    
+    # Create single-use invite link
+    invite_link = await create_single_use_invite_link(
+        context,
+        user_id,
+        username,
+        order_id
+    )
+    
+    if not invite_link:
+        try:
+            await processing_msg.delete()
+        except:
+            pass
+        
+        await query.message.reply_text(
+            f"❌ *Error Creating Invite Link*\n\n"
+            f"Please contact admin: {ADMIN_USERNAME}\n"
+            f"Your Order ID: `{order_id}`",
+            parse_mode='Markdown',
+            protect_content=True
+        )
+        
+        # Notify admin
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ Failed to create invite link for Order: {order_id}\nUser: {username} ({user_id})",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+        
         return
     
     # Update order status
-    orders_db[order_id]['status'] = 'awaiting_approval'
-    orders_db[order_id]['confirmed_at'] = datetime.now().isoformat()
+    orders_db[order_id]['status'] = 'approved'
+    orders_db[order_id]['approved_at'] = datetime.now().isoformat()
+    orders_db[order_id]['invite_link'] = invite_link
     save_db(ORDERS_FILE, orders_db)
     
-    # Send confirmation to user
-    confirmation_message = f"""
-✅ **PAYMENT CONFIRMATION RECEIVED**
-
-Thank you! Your payment confirmation has been received.
-
-📋 **Order ID:** `{order_id}`
-💰 **Amount:** ₹{order['amount']}
-⏰ **Submitted:** Just now
-👤 **Status:** Awaiting Admin Verification
-
-**⏳ Next Steps:**
-
-Admin will verify your payment manually and you'll be notified:
-
-**If Approved:**
-✅ You'll receive a message with your single-use invite link
-✅ Link will be valid for {INVITE_LINK_EXPIRY_HOURS} hours
-✅ Use it to join the premium channel
-
-**Verification Time:** Usually within 1 hour
-
-**Need Help?**
-Contact admin: {ADMIN_USERNAME}
-
-Your Order ID: `{order_id}`
-Keep this for reference!
-"""
+    # Add to members
+    add_member(user_id, username, order_id)
     
-    await query.edit_message_text(
-        confirmation_message,
-        parse_mode='Markdown'
-    )
+    # Delete processing message
+    try:
+        await processing_msg.delete()
+    except:
+        pass
     
-    # Notify admin
-    if ADMIN_CHAT_ID:
-        await notify_admin_new_payment(context, order_id, order)
-    
-    logger.info(f"✅ Payment confirmed by user {user_id} for order {order_id}")
+    # Send success message with invite link
+    success_message = f"""
+✅ *PAYMENT CONFIRMED - ACCESS GRANTED!* ✅
 
+🎉 Congratulations! Your payment has been confirmed!
 
-async def notify_admin_new_payment(context, order_id, order):
-    """Notify admin about new payment to verify"""
-    
-    admin_message = f"""
-🔔 **NEW PAYMENT TO VERIFY** 🔔
+📋 *Order ID:* `{order_id}`
+💰 *Amount:* ₹{order['amount']}
+✨ *Status:* Approved & Active
 
-📋 **Order ID:** `{order_id}`
-👤 **User:** {order['first_name']} (@{order['username']})
-🆔 **User ID:** `{order['user_id']}`
-💰 **Amount:** ₹{order['amount']}
-⏰ **Time:** {order['confirmed_at']}
+*🔗 YOUR EXCLUSIVE INVITE LINK:*
 
-**⚠️ ACTION REQUIRED:**
+{invite_link}
 
-Please check your UPI app for payment of ₹{order['amount']} and then:
+*⚡ NEXT STEPS:*
 
-✅ **If payment received:** Use command:
-`/approve {order_id}`
+1️⃣ Click the link above
+2️⃣ Join the premium channel
+3️⃣ Start enjoying premium content!
 
-❌ **If payment NOT received:** Use command:
-`/reject {order_id}`
+*🔒 IMPORTANT:*
+• This link works ONLY ONCE
+• Valid for {INVITE_LINK_EXPIRY_HOURS} hours
+• Cannot be shared with others
+• Use it now to get access!
 
-**Quick Commands:**
-• `/approve {order_id}` - Approve and send invite link
-• `/reject {order_id}` - Reject order
-• `/pending` - See all pending orders
+*⏰ Link Expires:* {(datetime.now() + timedelta(hours=INVITE_LINK_EXPIRY_HOURS)).strftime('%d %b %Y, %I:%M %p')}
+
+Welcome to the premium family! 🚀
+
+*Need help?* Contact: {ADMIN_USERNAME}
 """
     
     keyboard = [
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f'admin_approve_{order_id}'),
-            InlineKeyboardButton("❌ Reject", callback_data=f'admin_reject_{order_id}')
-        ],
-        [InlineKeyboardButton("📋 View All Pending", callback_data='admin_pending')]
+        [InlineKeyboardButton("🔗 Join Premium Channel", url=invite_link)],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    await query.message.reply_text(
+        success_message,
+        reply_markup=reply_markup,
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
+        protect_content=True  # Prevent forwarding
+    )
+    
+    # Notify admin
     try:
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
-            text=admin_message,
-            reply_markup=reply_markup,
+            text=f"✅ *New Member*\n\n"
+                 f"📋 Order: `{order_id}`\n"
+                 f"👤 User: {order['first_name']} (@{username})\n"
+                 f"🆔 User ID: `{user_id}`\n"
+                 f"💰 Amount: ₹{order['amount']}\n"
+                 f"⏰ Time: {datetime.now().strftime('%d %b, %I:%M %p')}",
             parse_mode='Markdown'
         )
-        logger.info(f"📤 Admin notified about order {order_id}")
     except Exception as e:
-        logger.error(f"❌ Error notifying admin: {e}")
+        logger.error(f"Error notifying admin: {e}")
+    
+    logger.info(f"✅ Order {order_id} approved automatically for user {user_id}")
 
 
 async def contact_admin(query, context):
-    """Show admin contact information"""
+    """Show admin contact - for text messages"""
     message = f"""
-📞 **CONTACT ADMIN**
+📞 *CONTACT ADMIN*
 
 Need help? Contact our admin:
 
-👤 **Admin:** {ADMIN_USERNAME}
+👤 *Admin:* {ADMIN_USERNAME}
 
-**Common Questions:**
-• Payment verification status
-• Invite link not received
-• Technical issues
+*Common Issues:*
+• Payment problems
+• Invite link expired
+• Technical support
 • Refund requests
 
-**Response Time:** Usually within 1-2 hours
+*Response Time:* Usually within 1-2 hours
 
-Click below to message admin directly:
+Click below to message admin:
 """
     
     keyboard = [
         [InlineKeyboardButton("💬 Message Admin", url=f"https://t.me/{ADMIN_USERNAME.replace('@', '')}")],
-        [InlineKeyboardButton("🔙 Back", callback_data='back_main')],
+        [InlineKeyboardButton("🔙 Back to Main", callback_data='back_main')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    try:
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await query.message.reply_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            protect_content=True
+        )
 
 
 async def back_to_main(query, context):
-    """Return to main menu"""
+    """Return to main menu - for text messages"""
     user = query.from_user
     
     welcome_message = f"""
-🎉 **Welcome back, {user.first_name}!** 🎉
+🎉 *Welcome back, {user.first_name}!*
 
-Get **Lifetime Premium Access** for just **₹{MEMBERSHIP_PRICE}**! 🚀
+Get *Lifetime Premium Access* for just *₹{MEMBERSHIP_PRICE}*! 🚀
 
-💳 Simple UPI payment
-✅ Manual verification for security
-🔒 Single-use invite link
-⏱️ Quick approval (usually 1 hour)
+✨ *Features:*
+• ⚡ Instant access after payment
+• 🔒 Secure one-time invite link
+• ♾️ Lifetime membership
+• 📱 Works with any UPI app
 
-Ready to join?
+Ready to join? 👇
 """
     
     keyboard = [
         [InlineKeyboardButton("🚀 Join Membership", callback_data='join_membership')],
+        [InlineKeyboardButton("ℹ️ How It Works", callback_data='how_it_works')],
         [InlineKeyboardButton("📞 Contact Admin", callback_data='contact_admin')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        welcome_message,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
+    try:
+        await query.edit_message_text(
+            welcome_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await query.message.reply_text(
+            welcome_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown',
+            protect_content=True
+        )
 
 
 # ============================================================
 # ADMIN COMMANDS
 # ============================================================
 
-async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin approves payment and sends invite link"""
-    user_id = update.effective_user.id
-    
-    # Check if admin
-    if str(user_id) != ADMIN_CHAT_ID and update.effective_user.username != ADMIN_USERNAME.replace('@', ''):
-        await update.message.reply_text("❌ Unauthorized!")
-        return
-    
-    # Get order ID from command
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Usage: `/approve ORDER_ID`\n\n"
-            "Example: `/approve ORD1706123456`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    order_id = context.args[0]
-    
-    if order_id not in orders_db:
-        await update.message.reply_text(f"❌ Order ID `{order_id}` not found!", parse_mode='Markdown')
-        return
-    
-    order = orders_db[order_id]
-    
-    if order['status'] == 'approved':
-        await update.message.reply_text(f"⚠️ Order `{order_id}` is already approved!", parse_mode='Markdown')
-        return
-    
-    # Create single-use invite link
-    invite_link = await create_single_use_invite_link(
-        context,
-        order['user_id'],
-        order['username']
-    )
-    
-    if not invite_link:
-        await update.message.reply_text(
-            f"❌ Failed to create invite link for order `{order_id}`\n"
-            f"Make sure bot is admin in channel with invite permissions!",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Update order status
-    orders_db[order_id]['status'] = 'approved'
-    orders_db[order_id]['approved_at'] = datetime.now().isoformat()
-    orders_db[order_id]['approved_by'] = update.effective_user.username
-    orders_db[order_id]['invite_link'] = invite_link
-    save_db(ORDERS_FILE, orders_db)
-    
-    # Add to members
-    add_member(order['user_id'], order['username'], order_id)
-    
-    # Send invite link to user
-    user_message = f"""
-✅ **PAYMENT VERIFIED - ACCESS GRANTED!** ✅
-
-🎉 Congratulations! Your payment has been verified by admin.
-
-📋 **Order ID:** `{order_id}`
-💰 **Amount:** ₹{order['amount']}
-✨ **Status:** Approved
-
-**🔗 YOUR EXCLUSIVE INVITE LINK:**
-
-{invite_link}
-
-⚠️ **IMPORTANT - READ CAREFULLY:**
-
-🔒 **This link is ONLY for you**
-• Single-use link (works only once)
-• Expires in {INVITE_LINK_EXPIRY_HOURS} hours
-• Cannot be shared or reused
-• Click to join the premium channel
-
-⏰ **Expires:** {(datetime.now() + timedelta(hours=INVITE_LINK_EXPIRY_HOURS)).strftime('%d %b %Y, %I:%M %p')}
-
-👉 Click the link above NOW to join!
-
-Welcome to the premium family! 🚀
-
-Questions? Contact: {ADMIN_USERNAME}
-"""
-    
-    try:
-        await context.bot.send_message(
-            chat_id=order['user_id'],
-            text=user_message,
-            parse_mode='Markdown'
-        )
-        
-        # Confirm to admin
-        await update.message.reply_text(
-            f"✅ **Order Approved Successfully!**\n\n"
-            f"📋 Order: `{order_id}`\n"
-            f"👤 User: {order['first_name']} (@{order['username']})\n"
-            f"🆔 User ID: `{order['user_id']}`\n"
-            f"💰 Amount: ₹{order['amount']}\n"
-            f"🔗 Invite link sent to user\n"
-            f"⏰ Link expires in {INVITE_LINK_EXPIRY_HOURS} hours",
-            parse_mode='Markdown'
-        )
-        
-        logger.info(f"✅ Order {order_id} approved by admin")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error sending message to user: {e}")
-        logger.error(f"❌ Error sending invite link: {e}")
-
-
-async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin rejects payment"""
-    user_id = update.effective_user.id
-    
-    # Check if admin
-    if str(user_id) != ADMIN_CHAT_ID and update.effective_user.username != ADMIN_USERNAME.replace('@', ''):
-        await update.message.reply_text("❌ Unauthorized!")
-        return
-    
-    # Get order ID
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Usage: `/reject ORDER_ID [reason]`\n\n"
-            "Example: `/reject ORD1706123456 Payment not received`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    order_id = context.args[0]
-    reason = ' '.join(context.args[1:]) if len(context.args) > 1 else "Payment verification failed"
-    
-    if order_id not in orders_db:
-        await update.message.reply_text(f"❌ Order ID `{order_id}` not found!", parse_mode='Markdown')
-        return
-    
-    order = orders_db[order_id]
-    
-    # Update order status
-    orders_db[order_id]['status'] = 'rejected'
-    orders_db[order_id]['rejected_at'] = datetime.now().isoformat()
-    orders_db[order_id]['rejected_by'] = update.effective_user.username
-    orders_db[order_id]['reject_reason'] = reason
-    save_db(ORDERS_FILE, orders_db)
-    
-    # Notify user
-    user_message = f"""
-❌ **PAYMENT VERIFICATION FAILED**
-
-We're sorry, but your payment could not be verified.
-
-📋 **Order ID:** `{order_id}`
-💰 **Amount:** ₹{order['amount']}
-❌ **Status:** Rejected
-
-**Reason:** {reason}
-
-**What to do next:**
-
-1. Check your UPI app - payment might have failed
-2. If payment was successful, contact admin with:
-   • Order ID: `{order_id}`
-   • Payment screenshot
-   • Transaction ID
-
-3. You can create a new order if needed
-
-Contact admin: {ADMIN_USERNAME}
-
-We apologize for the inconvenience.
-"""
-    
-    try:
-        await context.bot.send_message(
-            chat_id=order['user_id'],
-            text=user_message,
-            parse_mode='Markdown'
-        )
-        
-        await update.message.reply_text(
-            f"✅ Order rejected and user notified\n\n"
-            f"📋 Order: `{order_id}`\n"
-            f"❌ Reason: {reason}",
-            parse_mode='Markdown'
-        )
-        
-        logger.info(f"❌ Order {order_id} rejected by admin: {reason}")
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-async def admin_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show all pending orders"""
-    user_id = update.effective_user.id
-    
-    # Check if admin
-    if str(user_id) != ADMIN_CHAT_ID and update.effective_user.username != ADMIN_USERNAME.replace('@', ''):
-        await update.message.reply_text("❌ Unauthorized!")
-        return
-    
-    pending = get_pending_orders()
-    
-    if not pending:
-        await update.message.reply_text("✅ No pending orders!")
-        return
-    
-    message = f"📋 **PENDING ORDERS ({len(pending)})**\n\n"
-    
-    for order_id, order in pending:
-        message += (
-            f"**Order:** `{order_id}`\n"
-            f"👤 {order['first_name']} (@{order['username']})\n"
-            f"🆔 User ID: `{order['user_id']}`\n"
-            f"💰 ₹{order['amount']}\n"
-            f"⏰ {order['confirmed_at']}\n"
-            f"**Action:** `/approve {order_id}` or `/reject {order_id}`\n\n"
-        )
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot statistics"""
     user_id = update.effective_user.id
     
     # Check if admin
-    if str(user_id) != ADMIN_CHAT_ID and update.effective_user.username != ADMIN_USERNAME.replace('@', ''):
+    if str(user_id) != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Unauthorized!")
         return
     
     total_orders = len(orders_db)
     approved = sum(1 for o in orders_db.values() if o['status'] == 'approved')
-    pending = sum(1 for o in orders_db.values() if o['status'] == 'awaiting_approval')
-    rejected = sum(1 for o in orders_db.values() if o['status'] == 'rejected')
+    pending = sum(1 for o in orders_db.values() if o['status'] == 'pending')
     total_members = len(members_db)
     revenue = sum(o['amount'] for o in orders_db.values() if o['status'] == 'approved')
     
     stats_message = f"""
-📊 **BOT STATISTICS**
+📊 *BOT STATISTICS*
 
-**Orders:**
+*Orders:*
 📦 Total: {total_orders}
 ✅ Approved: {approved}
 ⏳ Pending: {pending}
-❌ Rejected: {rejected}
 
-**Members:**
+*Members:*
 👥 Total: {total_members}
-🔗 Invite Links: {len(invite_links_db)}
+🔗 Active Links: {len(invite_links_db)}
 
-**Revenue:**
+*Revenue:*
 💰 Total: ₹{revenue}
 
-**Commands:**
-`/pending` - View pending orders
-`/approve ORDER_ID` - Approve order
-`/reject ORDER_ID` - Reject order
-`/stats` - View statistics
-`/members` - List all members
+*Database:*
+📁 Orders: {ORDERS_FILE}
+📁 Members: {MEMBERS_FILE}
+📁 Links: {INVITE_LINKS_FILE}
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
@@ -832,7 +829,7 @@ async def admin_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     # Check if admin
-    if str(user_id) != ADMIN_CHAT_ID and update.effective_user.username != ADMIN_USERNAME.replace('@', ''):
+    if str(user_id) != ADMIN_CHAT_ID:
         await update.message.reply_text("❌ Unauthorized!")
         return
     
@@ -840,30 +837,116 @@ async def admin_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 No members yet!")
         return
     
-    message = f"👥 **ALL MEMBERS ({len(members_db)})**\n\n"
+    message = f"👥 *ALL MEMBERS ({len(members_db)})*\n\n"
     
-    for user_id, member in members_db.items():
+    for uid, member in list(members_db.items())[:20]:  # Show first 20
         message += (
             f"👤 @{member['username']}\n"
-            f"🆔 `{user_id}`\n"
+            f"🆔 `{uid}`\n"
             f"📋 Order: `{member['order_id']}`\n"
-            f"⏰ {member['joined_at']}\n\n"
+            f"⏰ {member['joined_at'][:10]}\n\n"
         )
-        
-        if len(message) > 3500:  # Telegram message limit
-            await update.message.reply_text(message, parse_mode='Markdown')
-            message = ""
     
-    if message:
-        await update.message.reply_text(message, parse_mode='Markdown')
+    if len(members_db) > 20:
+        message += f"\n... and {len(members_db) - 20} more members"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List recent orders"""
+    user_id = update.effective_user.id
+    
+    # Check if admin
+    if str(user_id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Unauthorized!")
+        return
+    
+    if not orders_db:
+        await update.message.reply_text("📭 No orders yet!")
+        return
+    
+    # Get last 10 orders
+    recent_orders = sorted(
+        orders_db.items(),
+        key=lambda x: x[1]['created_at'],
+        reverse=True
+    )[:10]
+    
+    message = f"📋 *RECENT ORDERS ({len(recent_orders)})*\n\n"
+    
+    for order_id, order in recent_orders:
+        status_emoji = "✅" if order['status'] == 'approved' else "⏳"
+        message += (
+            f"{status_emoji} `{order_id}`\n"
+            f"👤 {order['first_name']} (@{order.get('username', 'N/A')})\n"
+            f"💰 ₹{order['amount']} | {order['status']}\n"
+            f"⏰ {order['created_at'][:16]}\n\n"
+        )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+# ============================================================
+# ERROR HANDLER
+# ============================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors"""
+    logger.error(f"Exception while handling an update: {context.error}")
 
 
 # ============================================================
 # MAIN FUNCTION
 # ============================================================
 
+def validate_config():
+    """Validate configuration"""
+    errors = []
+    
+    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        errors.append("❌ TELEGRAM_BOT_TOKEN not set")
+    
+    if ADMIN_CHAT_ID == "YOUR_ADMIN_CHAT_ID":
+        errors.append("❌ ADMIN_CHAT_ID not set")
+    
+    if UPI_ID == "your-upi-id@bank":
+        errors.append("❌ UPI_ID not set")
+    
+    if PREMIUM_CHANNEL_ID == -1001234567890:
+        errors.append("❌ PREMIUM_CHANNEL_ID not set")
+    
+    if errors:
+        print("\n" + "="*60)
+        print("🚫 CONFIGURATION ERRORS:")
+        print("="*60)
+        for error in errors:
+            print(error)
+        print("="*60)
+        print("\nPlease fix config.py and try again.")
+        print("See SETUP_GUIDE.md for help.\n")
+        return False
+    
+    return True
+
+
 def main():
     """Start the bot"""
+    
+    # Validate configuration
+    if not validate_config():
+        exit(1)
+    
+    print("\n" + "="*60)
+    print("🚀 STARTING AUTOMATIC MEMBERSHIP BOT")
+    print("="*60)
+    print(f"💳 Payment: UPI (₹{MEMBERSHIP_PRICE})")
+    print(f"⚡ Access: Automatic (Instant)")
+    print(f"🔒 Links: Single-use ({INVITE_LINK_EXPIRY_HOURS}h expiry)")
+    print(f"📱 Channel ID: {PREMIUM_CHANNEL_ID}")
+    print("="*60 + "\n")
+    
+    # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # User handlers
@@ -871,17 +954,19 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback))
     
     # Admin commands
-    application.add_handler(CommandHandler("approve", admin_approve))
-    application.add_handler(CommandHandler("reject", admin_reject))
-    application.add_handler(CommandHandler("pending", admin_pending))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("members", admin_members))
+    application.add_handler(CommandHandler("orders", admin_orders))
     
-    logger.info("🚀 Semi-Automatic Bot Started!")
-    logger.info("💳 Payment: UPI (No Gateway Fees)")
-    logger.info("✅ Verification: Manual by Admin")
-    logger.info("🔒 Links: Single-use with expiry")
+    # Error handler
+    application.add_error_handler(error_handler)
     
+    logger.info("✅ Bot Started Successfully!")
+    logger.info(f"💰 Membership Price: ₹{MEMBERSHIP_PRICE}")
+    logger.info(f"🔗 Invite Link Expiry: {INVITE_LINK_EXPIRY_HOURS} hours")
+    logger.info(f"📱 Premium Channel: {PREMIUM_CHANNEL_ID}")
+    
+    # Start polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
