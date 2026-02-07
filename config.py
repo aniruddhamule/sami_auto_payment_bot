@@ -19,7 +19,7 @@ BOT_NAME = "Premium Membership Bot"
 # ============================================================
 
 # Admin Username (with @)
-ADMIN_USERNAME = "@Maclustersupports"
+ADMIN_USERNAME = "@grandfather009"
 
 # Admin Chat ID (for notifications)
 # Get from @userinfobot
@@ -58,31 +58,3 @@ PREMIUM_CHANNEL_LINK = "https://t.me/+ElNqgNA939BlMDU1"
 
 # Link expiry time (hours)
 INVITE_LINK_EXPIRY_HOURS = 24
-
-# ============================================================
-# NOTES
-# ============================================================
-"""
-✅ All required fields are configured above
-✅ Bot is ready to use
-✅ No payment gateway needed
-✅ Direct UPI payments only
-
-To deploy:
-1. Ensure Docker is installed
-2. Run: chmod +x setup.sh
-3. Run: ./setup.sh
-4. Bot will start automatically
-
-To test:
-1. Send /start to your bot
-2. Test the complete flow
-3. Verify all buttons work
-4. Check message cleanup
-5. Verify invite links work
-
-Admin Commands:
-/stats - View statistics
-/members - List all members
-/orders - View recent orders
-"""
